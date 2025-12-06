@@ -912,6 +912,7 @@ document.addEventListener('DOMContentLoaded', function() {
 			remoteVideo.srcObject = remoteStream;
 			callStatus.textContent = `Connected with ${displayName}`;
 			notifications.success(`Connected with ${displayName}`, "Call Connected");
+			currentCall = { userId, displayName, callId };
 		};
 		
 		// Handle ICE candidates
@@ -934,57 +935,79 @@ document.addEventListener('DOMContentLoaded', function() {
 			}
 		};
 		
-		// Create offer
-		peerConnection.createOffer()
-			.then(offer => {
-				return peerConnection.setLocalDescription(offer);
-			})
-			.then(() => {
-				// Send offer to remote peer via Firebase
-				database.ref(`calls/${callId}`).set({
-					offer: peerConnection.localDescription,
-					from: currentUser.uid,
-					to: userId,
-					fromName: currentUser.displayName || 'Unknown User',
-					timestamp: firebase.database.ServerValue.TIMESTAMP
-				});
-				
-				// Set up listeners for response
-				database.ref(`calls/${callId}/answer`).on('value', snapshot => {
-					if (snapshot.exists() && !currentCall) {
-						const answer = snapshot.val();
-						peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
-							.then(() => {
-								currentCall = { userId, displayName, callId };
-							})
-							.catch(error => {
-								console.error("Error setting remote description:", error);
-								notifications.error("Failed to connect call", "Connection Error");
+		try {
+			// Create offer
+			peerConnection.createOffer()
+				.then(offer => {
+					console.log("Offer created successfully");
+					return peerConnection.setLocalDescription(offer);
+				})
+				.then(() => {
+					console.log("Local description set successfully");
+					// Send offer to remote peer via Firebase
+					database.ref(`calls/${callId}`).set({
+						offer: peerConnection.localDescription,
+						from: currentUser.uid,
+						to: userId,
+						fromName: currentUser.displayName || 'Unknown User',
+						timestamp: firebase.database.ServerValue.TIMESTAMP
+					});
+					
+					// Set up listeners for response
+					database.ref(`calls/${callId}/answer`).on('value', snapshot => {
+						if (snapshot.exists() && !currentCall) {
+							const answerData = snapshot.val();
+							console.log("Answer received:", answerData);
+							
+							if (!answerData.answer) {
+								console.error("No answer data in response");
+								return;
+							}
+							
+							// Create a proper RTCSessionDescription object
+							const answer = new RTCSessionDescription({
+								type: answerData.answer.type || 'answer',
+								sdp: answerData.answer.sdp || answerData.answer
 							});
-					}
+							
+							peerConnection.setRemoteDescription(answer)
+								.then(() => {
+									console.log("Remote description set successfully");
+									currentCall = { userId, displayName, callId };
+								})
+								.catch(error => {
+									console.error("Error setting remote description:", error);
+									notifications.error("Failed to connect call", "Connection Error");
+								});
+						}
+					});
+					
+					// Listen for ICE candidates from remote peer
+					database.ref(`calls/${callId}/iceCandidates/${userId}`).on('child_added', snapshot => {
+						if (snapshot.exists()) {
+							const candidate = snapshot.val().candidate;
+							peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+						}
+					});
+					
+					// Set up timeout for unanswered call
+					callTimeout = setTimeout(() => {
+						if (!currentCall) {
+							notifications.warning(`${displayName} didn't answer`, "Call Unanswered");
+							endCall();
+						}
+					}, 30000); // 30 seconds
+				})
+				.catch(error => {
+					console.error("Error creating offer:", error);
+					callStatus.textContent = "Failed to create call";
+					notifications.error("Failed to create call. Please try again.", "Call Error");
 				});
-				
-				// Listen for ICE candidates from remote peer
-				database.ref(`calls/${callId}/iceCandidates/${userId}`).on('child_added', snapshot => {
-					if (snapshot.exists()) {
-						const candidate = snapshot.val().candidate;
-						peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-					}
-				});
-				
-				// Set up timeout for unanswered call
-				callTimeout = setTimeout(() => {
-					if (!currentCall) {
-						notifications.warning(`${displayName} didn't answer`, "Call Unanswered");
-						endCall();
-					}
-				}, 30000); // 30 seconds
-			})
-			.catch(error => {
-				console.error("Error creating offer:", error);
-				callStatus.textContent = "Failed to create call";
-				notifications.error("Failed to create call. Please try again.", "Call Error");
-			});
+		} catch (error) {
+			console.error("Error in startCall:", error);
+			callStatus.textContent = "Failed to create call";
+			notifications.error("Failed to initialize call", "Call Error");
+		}
 	}
 
 	// Answer a call
@@ -995,10 +1018,17 @@ document.addEventListener('DOMContentLoaded', function() {
 			return;
 		}
 		
+		// Validate call data
+		if (!callData || !callData.offer) {
+			console.error("Invalid call data received:", callData);
+			notifications.error("Invalid call data received", "Call Error");
+			return;
+		}
+		
 		incomingCallData = callData;
 		
 		// Show incoming call modal
-		callerName.textContent = callData.fromName;
+		callerName.textContent = callData.fromName || 'Unknown User';
 		const avatarText = callData.fromName ? 
 			callData.fromName.charAt(0).toUpperCase() : 'U';
 		callerAvatar.textContent = avatarText;
@@ -1020,6 +1050,14 @@ document.addEventListener('DOMContentLoaded', function() {
 		if (callTimeout) {
 			clearTimeout(callTimeout);
 			callTimeout = null;
+		}
+		
+		// Validate offer data
+		if (!incomingCallData.offer) {
+			console.error("No offer data in incoming call:", incomingCallData);
+			notifications.error("No call offer received", "Connection Error");
+			incomingCallModal.classList.remove('show');
+			return;
 		}
 		
 		// Hide modal
@@ -1070,33 +1108,50 @@ document.addEventListener('DOMContentLoaded', function() {
 			}
 		};
 		
-		// Set remote description and create answer
-		peerConnection.setRemoteDescription(new RTCSessionDescription(incomingCallData.offer))
-			.then(() => {
-				return peerConnection.createAnswer();
-			})
-			.then(answer => {
-				return peerConnection.setLocalDescription(answer);
-			})
-			.then(() => {
-				// Send answer to caller via Firebase
-				database.ref(`calls/${incomingCallData.callId}/answer`).set({
-					answer: peerConnection.localDescription
-				});
-				
-				// Listen for ICE candidates from caller
-				database.ref(`calls/${incomingCallData.callId}/iceCandidates/${incomingCallData.from}`).on('child_added', snapshot => {
-					if (snapshot.exists()) {
-						const candidate = snapshot.val().candidate;
-						peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-					}
-				});
-			})
-			.catch(error => {
-				console.error("Error answering call:", error);
-				callStatus.textContent = "Failed to answer call";
-				notifications.error("Failed to answer call. Please try again.", "Call Error");
+		try {
+			// Create a proper RTCSessionDescription object
+			const offer = new RTCSessionDescription({
+				type: incomingCallData.offer.type || 'offer',
+				sdp: incomingCallData.offer.sdp || incomingCallData.offer
 			});
+			
+			// Set remote description and create answer
+			peerConnection.setRemoteDescription(offer)
+				.then(() => {
+					console.log("Remote description set successfully");
+					return peerConnection.createAnswer();
+				})
+				.then(answer => {
+					console.log("Answer created successfully");
+					return peerConnection.setLocalDescription(answer);
+				})
+				.then(() => {
+					console.log("Local description set successfully");
+					// Send answer to caller via Firebase
+					database.ref(`calls/${incomingCallData.callId}/answer`).set({
+						answer: peerConnection.localDescription
+					});
+					
+					// Listen for ICE candidates from caller
+					database.ref(`calls/${incomingCallData.callId}/iceCandidates/${incomingCallData.from}`).on('child_added', snapshot => {
+						if (snapshot.exists()) {
+							const candidate = snapshot.val().candidate;
+							peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+						}
+					});
+				})
+				.catch(error => {
+					console.error("Error in WebRTC handshake:", error);
+					callStatus.textContent = "Failed to answer call";
+					notifications.error("Failed to establish connection. Please try again.", "Connection Error");
+					endCall();
+				});
+		} catch (error) {
+			console.error("Error creating RTCSessionDescription:", error);
+			callStatus.textContent = "Failed to answer call";
+			notifications.error("Invalid call data received", "Connection Error");
+			incomingCallModal.classList.remove('show');
+		}
 		
 		incomingCallData = null;
 	}
@@ -1205,11 +1260,21 @@ document.addEventListener('DOMContentLoaded', function() {
 				const callId = snapshot.key;
 				const callData = snapshot.val();
 				
+				console.log("Incoming call detected:", callData);
+				
 				// Only handle incoming calls (where current user is recipient)
 				if (callData.to === currentUser.uid && !currentCall) {
 					// Add call ID to the data
 					callData.callId = callId;
-					answerCall(callData);
+					
+					// Validate the call data before processing
+					if (callData.offer && callData.from) {
+						answerCall(callData);
+					} else {
+						console.error("Invalid call data received:", callData);
+						// Clean up invalid call data
+						database.ref(`calls/${callId}`).remove();
+					}
 				}
 			}
 		});
