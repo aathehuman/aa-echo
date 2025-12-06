@@ -908,6 +908,7 @@ document.addEventListener('DOMContentLoaded', function() {
 		
 		// Handle remote stream
 		peerConnection.ontrack = event => {
+			console.log("Remote track received:", event);
 			remoteStream = event.streams[0];
 			remoteVideo.srcObject = remoteStream;
 			callStatus.textContent = `Connected with ${displayName}`;
@@ -946,7 +947,10 @@ document.addEventListener('DOMContentLoaded', function() {
 					console.log("Local description set successfully");
 					// Send offer to remote peer via Firebase
 					database.ref(`calls/${callId}`).set({
-						offer: peerConnection.localDescription,
+						offer: {
+							type: peerConnection.localDescription.type,
+							sdp: peerConnection.localDescription.sdp
+						},
 						from: currentUser.uid,
 						to: userId,
 						fromName: currentUser.displayName || 'Unknown User',
@@ -1042,6 +1046,38 @@ document.addEventListener('DOMContentLoaded', function() {
 		}, 30000);
 	}
 
+	// Answer a call
+	function answerCall(callData) {
+		if (currentCall) {
+			// Already in a call, reject this one
+			database.ref(`calls/${callData.callId}`).remove();
+			return;
+		}
+		
+		// Validate call data
+		if (!callData || !callData.offer) {
+			console.error("Invalid call data received:", callData);
+			notifications.error("Invalid call data received", "Call Error");
+			return;
+		}
+		
+		incomingCallData = callData;
+		
+		// Show incoming call modal
+		callerName.textContent = callData.fromName || 'Unknown User';
+		const avatarText = callData.fromName ? 
+			callData.fromName.charAt(0).toUpperCase() : 'U';
+		callerAvatar.textContent = avatarText;
+		incomingCallModal.classList.add('show');
+		
+		// Auto-reject after 30 seconds if not answered
+		callTimeout = setTimeout(() => {
+			if (incomingCallData) {
+				rejectCall();
+			}
+		}, 30000);
+	}
+
 	// Accept incoming call
 	function acceptCall() {
 		if (!incomingCallData) return;
@@ -1050,14 +1086,6 @@ document.addEventListener('DOMContentLoaded', function() {
 		if (callTimeout) {
 			clearTimeout(callTimeout);
 			callTimeout = null;
-		}
-		
-		// Validate offer data
-		if (!incomingCallData.offer) {
-			console.error("No offer data in incoming call:", incomingCallData);
-			notifications.error("No call offer received", "Connection Error");
-			incomingCallModal.classList.remove('show');
-			return;
 		}
 		
 		// Hide modal
@@ -1077,15 +1105,18 @@ document.addEventListener('DOMContentLoaded', function() {
 		
 		// Handle remote stream
 		peerConnection.ontrack = event => {
-			remoteStream = event.streams[0];
-			remoteVideo.srcObject = remoteStream;
-			callStatus.textContent = `Connected with ${incomingCallData.fromName}`;
-			notifications.success(`Connected with ${incomingCallData.fromName}`, "Call Connected");
-			currentCall = { 
-				userId: incomingCallData.from, 
-				displayName: incomingCallData.fromName,
-				callId: incomingCallData.callId
-			};
+			console.log("Remote track received:", event);
+			if (event.streams && event.streams.length > 0) {
+				remoteStream = event.streams[0];
+				remoteVideo.srcObject = remoteStream;
+				callStatus.textContent = `Connected with ${incomingCallData.fromName}`;
+				notifications.success(`Connected with ${incomingCallData.fromName}`, "Call Connected");
+				currentCall = { 
+					userId: incomingCallData.from, 
+					displayName: incomingCallData.fromName,
+					callId: incomingCallData.callId
+				};
+			}
 		};
 		
 		// Handle ICE candidates
@@ -1129,7 +1160,10 @@ document.addEventListener('DOMContentLoaded', function() {
 					console.log("Local description set successfully");
 					// Send answer to caller via Firebase
 					database.ref(`calls/${incomingCallData.callId}/answer`).set({
-						answer: peerConnection.localDescription
+						answer: {
+							type: peerConnection.localDescription.type,
+							sdp: peerConnection.localDescription.sdp
+						}
 					});
 					
 					// Listen for ICE candidates from caller
@@ -1184,6 +1218,8 @@ document.addEventListener('DOMContentLoaded', function() {
 		}
 		
 		if (currentCall) {
+			console.log("Ending call with ID:", currentCall.callId);
+			
 			// Clean up peer connection
 			if (peerConnection) {
 				peerConnection.close();
@@ -1207,6 +1243,12 @@ document.addEventListener('DOMContentLoaded', function() {
 			currentCall = null;
 			callStatus.textContent = "Ready to make calls";
 			notifications.info("Call ended", "Call Status");
+		}
+		
+		// Also clear any incoming call
+		if (incomingCallData) {
+			incomingCallData = null;
+			incomingCallModal.classList.remove('show');
 		}
 	}
 
@@ -1255,6 +1297,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 	// Listen for incoming calls
 	function listenForIncomingCalls() {
+		// Use child_added instead of on for better handling
 		database.ref('calls').on('child_added', snapshot => {
 			if (snapshot.exists()) {
 				const callId = snapshot.key;
@@ -1267,8 +1310,8 @@ document.addEventListener('DOMContentLoaded', function() {
 					// Add call ID to the data
 					callData.callId = callId;
 					
-					// Validate the call data before processing
-					if (callData.offer && callData.from) {
+					// Validate the call data
+					if (callData.offer && callData.from && callData.fromName) {
 						answerCall(callData);
 					} else {
 						console.error("Invalid call data received:", callData);
@@ -1276,6 +1319,18 @@ document.addEventListener('DOMContentLoaded', function() {
 						database.ref(`calls/${callId}`).remove();
 					}
 				}
+			}
+		});
+		
+		// Also listen for call removals (when a call ends)
+		database.ref('calls').on('child_removed', snapshot => {
+			const callId = snapshot.key;
+			const callData = snapshot.val();
+			
+			// If this was our call and it's been removed, end our call
+			if (currentCall && currentCall.callId === callId) {
+				console.log("Call was removed from Firebase, ending call");
+				endCall();
 			}
 		});
 	}
