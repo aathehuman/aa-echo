@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>aa-echo</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="favicons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicons/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="favicons/favicon-16x16.png">
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- ====================================================== -->
+        <!-- AUTHENTICATION SECTION -->
+        <!-- ====================================================== -->
+        <section class="auth-container" id="auth-container">
+            <div class="auth-form">
+                <div class="app-logo">
+                    <h1>aa-echo.</h1>
+                    <p>private calling client.</p>
+                </div>
+                <div class="auth-tabs">
+                    <button class="auth-tab active" id="account-tab">Account Login</button>
+                    <button class="auth-tab" id="guest-tab">Chat as Guest</button>
+                </div>
+                
+                <!-- Guest Login Form -->
+                <div class="auth-panel" id="guest-panel">
+                    <div class="disabled-overlay">
+                        <h3>Guest Login Disabled</h3>
+                        <p>Please create an account to join calls.</p>
+                    </div>
+                    <h2>jump in.</h2>
+                    <div class="input-with-button">
+                        <input type="text" id="guest-username" placeholder="display name" maxlength="20">
+                        <button id="guest-login-btn">join</button>
+                    </div>
+                </div>
+                
+                <!-- Account Login Form -->
+                <div class="auth-panel active" id="account-panel">
+                    <h2>welcome back.</h2>
+                    <input type="email" id="email" placeholder="email">
+                    <div class="input-with-button">
+                        <input type="password" id="password" placeholder="password">
+                        <button id="login-btn">login</button>
+                    </div>
+                    <p class="auth-switch">don't have an account? <a href="#" id="show-signup">sign up.</a></p>
+                    <p class="auth-switch">forgot ur password? <a href="#" id="reset-password-btn">reset it.</a></p>
+                </div>
+                
+                <!-- Sign Up Form -->
+                <div class="auth-panel" id="signup-panel">
+                    <h2>welcome.</h2>
+                    <input type="email" id="signup-email" placeholder="Email">
+                    <div class="input-with-button">
+                        <input type="password" id="signup-password" placeholder="Password (must be 6+ characters)">
+                    </div>
+                    <div class="input-with-button">
+                        <input type="text" id="display-name" placeholder="Display Name">
+                        <button id="signup-btn">sign up</button>
+                    </div>
+                    <p class="auth-switch">already have an account? <a href="#" id="show-login">log in.</a></p>
+                </div>
+                
+                <!-- Set Username Form -->
+                <div class="auth-panel" id="username-panel">
+                    <h3>choose your username.</h3>
+                    <p>this is how others will see you in calls.</p>
+                    <input type="text" id="choose-username" placeholder="display name" maxlength="20">
+                    <button id="set-username-btn">continue</button>
+                </div>
+            </div>
+        </section>
+        
+        <!-- ====================================================== -->
+        <!-- MAIN APP SECTION -->
+        <!-- ====================================================== -->
+        <section class="app-main" id="app-main" style="display: none;">
+            
+            <!-- Mobile Menu Toggle -->
+            <button class="mobile-menu-toggle" id="mobile-menu-toggle">☰</button>
+            
+            <!-- Sidebar -->
+            <aside class="sidebar" id="sidebar">
+                <!-- User Profile Section -->
+                <div class="user-profile">
+                    <div class="user-avatar" id="user-avatar"></div>
+                    <div class="user-info">
+                        <div class="user-name-container">
+                            <div class="user-name" id="user-name"></div>
+                            <!-- Email Verification Icon -->
+                            <div class="email-verification-icon" id="email-verification-icon" style="display: none;" title="Email verification status">
+                                <span class="verification-icon" id="verification-icon">✓</span>
+                                <div class="verification-tooltip" id="verification-tooltip">
+                                    <div class="tooltip-content">
+                                        <span id="tooltip-status">verified</span>
+                                        <div id="tooltip-email" class="tooltip-email"></div>
+                                        <button id="verify-email-btn" class="tooltip-btn" style="display: none;">verify email</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="auth-actions">
+                            <button id="logout-btn" class="logout-btn">get out</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Public Rooms Section (Hidden for Echo but keeping structure) -->
+                <div class="rooms-section collapsible-section" id="rooms-section" style="display: none;">
+                    <div class="section-header">
+                        <h3>public chats</h3>
+                        <div class="section-controls">
+                            <div id="add-room-container" style="display: none;">
+                                <button id="open-new-room-modal-btn" class="refresh-btn">+</button>
+                            </div>
+                            <button class="collapse-toggle" data-section="rooms-section">▼</button>
+                        </div>
+                    </div>
+                    <div class="section-content" id="rooms-content">
+                        <div class="room-list" id="room-list">
+                            <div class="room-item active" data-room="general">General</div>
+                            <div class="room-item" data-room="random">Random</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Private Chats Section -->
+                <div class="recent-chats-section collapsible-section" id="recent-chats-section">
+                    <div class="section-header">
+                        <h3>humans</h3>
+                        <div class="section-controls">
+                            <button class="collapse-toggle" data-section="recent-chats-section">▼</button>
+                        </div>
+                    </div>
+                    <div class="section-content" id="recent-chats-content">
+                        <div class="recent-chats-list" id="contacts-list"></div>
+                    </div>
+                </div>
+
+                <!-- Admin Controls Section (Hidden for Echo but keeping structure) -->
+                <div class="admin-section collapsible-section" id="admin-section" style="display: none;">
+                    <div class="section-header">
+                        <h3>admin controls</h3>
+                        <button class="collapse-toggle" data-section="admin-section">▼</button>
+                    </div>
+                    <div class="section-content" id="admin-content">
+                        <div class="admin-controls">
+                            <!-- Admin controls content here -->
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Sidebar Footer -->
+                <div class="sidebar-footer">
+                    <p>made by <a href="https://sites.google.com/view/aa-infinitech/" target="_blank">aa</a> and adyan using ai</p>
+                    <a href="https://aa-echo.netlify.app/help" target="_blank">need help?</a>
+                </div>
+            </aside>
+            
+            <!-- Call Area -->
+            <main class="chat-area">
+                <!-- Chat Header -->
+                <div class="chat-header">
+                    <div class="header-left">
+                        <h2 id="current-call-name">ready to call.</h2>
+                        <div class="typing-indicator" id="typing-indicator"></div>
+                    </div>
+                    <span class="app-branding">aa-echo.</span>
+                </div>
+                
+                <!-- Call Container -->
+                <div class="messages" id="call-container">
+                    <div class="call-container">
+                        <!-- Local Video -->
+                        <div class="video-container local-video">
+                            <video id="local-video" autoplay muted></video>
+                            <div class="video-label">you</div>
+                        </div>
+                        
+                        <!-- Remote Video -->
+                        <div class="video-container remote-video">
+                            <video id="remote-video" autoplay></video>
+                            <div class="video-label" id="remote-video-label">waiting for connection...</div>
+                        </div>
+                        
+                        <!-- Call Controls -->
+                        <div class="call-controls">
+                            <button id="mute-btn" class="control-btn">🎙</button>
+                            <button id="video-btn" class="control-btn">📷</button>
+                            <button id="end-call-btn" class="control-btn end-call">✖️</button>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </section>
+    </div>
+    
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+    
+    <!-- Your app script -->
+    <script src="app.js?v=2"></script>
+    
+    <!-- Custom Notification Container -->
+    <div id="notification-container" class="notification-container"></div>
+</body>
+</html>
