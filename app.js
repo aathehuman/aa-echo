@@ -317,6 +317,34 @@ document.addEventListener('DOMContentLoaded', function() {
         localStorage.setItem('collapsedSections', JSON.stringify(collapsedSections));
         applyCollapsedStates();
     }
+	
+	// Safely set/play streams
+	async function setAndPlayVideoStream(videoElement, stream) {
+		if (!videoElement || !stream) return;
+		
+		try {
+			// Pause the video first to stop any current playback
+			videoElement.pause();
+			
+			// Set the new stream
+			videoElement.srcObject = stream;
+			
+			// Wait for the metadata to load
+			await videoElement.play();
+		} catch (error) {
+			if (error.name === 'AbortError') {
+				console.log("Video play was aborted, retrying...");
+				// Retry after a short delay
+				setTimeout(() => {
+					videoElement.play().catch(err => {
+						console.error("Still can't play video:", err);
+					});
+				}, 300);
+			} else {
+				console.error("Error playing video:", error);
+			}
+		}
+	}
 
     // ====================================================================================================
     // AUTHENTICATION FUNCTIONS
@@ -893,21 +921,6 @@ document.addEventListener('DOMContentLoaded', function() {
 			localStream = await navigator.mediaDevices.getUserMedia(constraints);
 			localVideo.srcObject = localStream;
 			
-			// After setting srcObject, try to restart the stream
-			remoteVideo.srcObject = remoteStream;
-			remoteVideo.load(); // Force reload
-			remoteVideo.play().then(() => {
-				console.log("Remote video playing successfully");
-			}).catch(e => {
-				console.error("Error playing remote video:", e);
-				// Try alternative method
-				setTimeout(() => {
-					remoteVideo.play().catch(err => {
-						console.error("Still can't play video:", err);
-					});
-				}, 1000);
-			});
-			
 			// Test microphone access
 			const audioTracks = localStream.getAudioTracks();
 			if (audioTracks.length === 0) {
@@ -954,29 +967,22 @@ document.addEventListener('DOMContentLoaded', function() {
 		// Handle remote stream
 		peerConnection.ontrack = (event) => {
 			console.log("Remote track received:", event);
-			console.log("Streams:", event.streams);
-			console.log("Track:", event.track);
 			
-			// Wait a moment for the stream to be fully ready
-			setTimeout(() => {
-				if (event.streams && event.streams.length > 0) {
-					remoteStream = event.streams[0];
+			if (event.streams && event.streams.length > 0) {
+				remoteStream = event.streams[0];
+				
+				// Check if the stream has tracks
+				if (remoteStream.getAudioTracks().length > 0 || remoteStream.getVideoTracks().length > 0) {
+					// Use our utility function to safely set and play the video
+					setAndPlayVideoStream(remoteVideo, remoteStream);
 					
-					// Check if the stream has tracks
-					if (remoteStream.getAudioTracks().length > 0 || remoteStream.getVideoTracks().length > 0) {
-						remoteVideo.srcObject = remoteStream;
-						remoteVideo.play().catch(e => {
-							console.error("Error playing remote video:", e);
-						});
-						
-						callStatus.textContent = `Connected with ${displayName}`;
-						notifications.success(`Connected with ${displayName}`, "Call Connected");
-						currentCall = { userId, displayName, callId };
-					} else {
-						console.error("Remote stream has no tracks");
-					}
+					callStatus.textContent = `Connected with ${displayName}`;
+					notifications.success(`Connected with ${displayName}`, "Call Connected");
+					currentCall = { userId, displayName, callId };
+				} else {
+					console.error("Remote stream has no tracks");
 				}
-			}, 100); // Small delay to ensure stream is ready
+			}
 		};
 		
 		// Handle ICE candidates
@@ -1118,35 +1124,24 @@ document.addEventListener('DOMContentLoaded', function() {
 		incomingCallData = callData;
 		
 		// Handle remote stream
-		peerConnection.ontrack = (event) => {
+		peerConnection.ontrack = event => {
 			console.log("Remote track received:", event);
-			console.log("Streams:", event.streams);
-			console.log("Track:", event.track);
-			
-			// Wait a moment for the stream to be fully ready
-			setTimeout(() => {
-				if (event.streams && event.streams.length > 0) {
-					remoteStream = event.streams[0];
-					
-					// Check if the stream has tracks
-					if (remoteStream.getAudioTracks().length > 0 || remoteStream.getVideoTracks().length > 0) {
-						remoteVideo.srcObject = remoteStream;
-						remoteVideo.play().catch(e => {
-							console.error("Error playing remote video:", e);
-						});
-						
-						callStatus.textContent = `Connected with ${callData.fromName}`;
-						notifications.success(`Connected with ${callData.fromName}`, "Call Connected");
-						currentCall = { 
-							userId: callData.from, 
-							displayName: callData.fromName,
-							callId: callData.callId
-						};
-					} else {
-						console.error("Remote stream has no tracks");
-					}
-				}
-			}, 100); // Small delay to ensure stream is ready
+			if (event.streams && event.streams.length > 0) {
+				remoteStream = event.streams[0];
+				
+				// Use our utility function to safely set and play the video
+				setAndPlayVideoStream(remoteVideo, remoteStream);
+				
+				callStatus.textContent = `Connected with ${callData.fromName}`;
+				notifications.success(`Connected with ${callData.fromName}`, "Call Connected");
+				
+				// Set currentCall only after successful connection
+				currentCall = { 
+					userId: callData.from, 
+					displayName: callData.fromName,
+					callId: callData.callId
+				};
+			}
 		};
 		
 		// Show incoming call modal
@@ -1380,8 +1375,12 @@ document.addEventListener('DOMContentLoaded', function() {
 				remoteStream = null;
 			}
 			
-			// Clear remote video
-			remoteVideo.srcObject = null;
+			// Properly clear remote video
+			if (remoteVideo) {
+				remoteVideo.pause();
+				remoteVideo.srcObject = null;
+			}
+			
 			remoteVideoLabel.textContent = "Waiting for connection...";
 			
 			// Remove call data from Firebase
