@@ -48,7 +48,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // GLOBAL VARIABLES AND STATE MANAGEMENT
     // ====================================================================================================
     
-    console.log("%c welcome to echo! ", 'font-size: 30px; background: linear-gradient(135deg, #1a1a2e, #32264a); border: 1px solid #fff; border-radius: 30px; font-weight: 1000;');
+    console.log("%c welcome to echo! ", 'font-size: 30px; background: linear-gradient(135deg, #1a1a2e, #294752); border: 1px solid #fff; border-radius: 30px; font-weight: 1000;');
     
     // DOM elements
     const authContainer = document.getElementById('auth-container');
@@ -108,6 +108,16 @@ document.addEventListener('DOMContentLoaded', function() {
 	// ====================================================================================================
 	// UTILITY FUNCTIONS
 	// ====================================================================================================
+	
+	// iOS Helper
+	document.addEventListener('click', function() {
+		// Check if we have a remote video that's not playing
+		if (remoteVideo && remoteVideo.srcObject && remoteVideo.paused) {
+			remoteVideo.play().catch(e => {
+				console.log("Could not resume video after user interaction:", e);
+			});
+		}
+	}, { once: false });
 
 	// Structured logging helper with optional color-coding
 	function log(message, level = 0, feature = null) {
@@ -864,6 +874,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
 	// A variable to hold the timeout ID for debouncing video play requests
 	let playVideoTimeout = null;
+	let playRetryCount = 0;
+	const MAX_PLAY_RETRIES = 3;
 
 	/**
 	 * Safely sets a new stream on a video element and plays it.
@@ -884,36 +896,56 @@ document.addEventListener('DOMContentLoaded', function() {
 
 		playVideoTimeout = setTimeout(async () => {
 			try {
-				// Pause the video first to stop any current playback
-				videoElement.pause();
-				
 				// Set the new stream
 				videoElement.srcObject = stream;
 				
-				// Wait for the metadata to load
-				await new Promise((resolve, reject) => {
-					videoElement.onloadedmetadata = resolve;
-					videoElement.onerror = reject;
-					
-					// Set a timeout in case the metadata never loads
-					setTimeout(() => reject(new Error('Metadata load timeout')), 5000);
-				});
+				// Reset retry count
+				playRetryCount = 0;
 				
 				// Try to play the video
-				await videoElement.play();
-				console.log("Remote video playing successfully");
+				await attemptPlayVideo(videoElement);
 			} catch (error) {
-				if (error.name === 'AbortError') {
-					console.log("Video play was aborted, retrying...");
-					// Retry after a short delay
-					setTimeout(() => {
-						setAndPlayVideoStream(videoElement, stream);
-					}, 300);
-				} else {
-					console.error("Error playing video:", error);
-				}
+				console.error("Fatal error in setAndPlayVideoStream:", error);
 			}
 		}, 100); // Debounce for 100ms
+	}
+
+	/**
+	 * Attempts to play a video element with retry logic for AbortError
+	 * @param {HTMLVideoElement} videoElement The video element to play
+	 * @param {number} retryCount Current retry attempt
+	 */
+	async function attemptPlayVideo(videoElement, retryCount = 0) {
+		try {
+			// Check if the video element is ready to play
+			if (videoElement.readyState < 2) { // HAVE_CURRENT_DATA
+				console.log("Video not ready, waiting...");
+				// Wait a bit and try again
+				setTimeout(() => attemptPlayVideo(videoElement, retryCount), 200);
+				return;
+			}
+			
+			// Try to play the video
+			await videoElement.play();
+			console.log("Remote video playing successfully");
+		} catch (error) {
+			if (error.name === 'AbortError' && retryCount < MAX_PLAY_RETRIES) {
+				console.log(`Video play was aborted, retrying (${retryCount + 1}/${MAX_PLAY_RETRIES})...`);
+				// Retry after a short delay
+				setTimeout(() => attemptPlayVideo(videoElement, retryCount + 1), 300);
+			} else if (error.name === 'NotAllowedError') {
+				console.warn("Video play was not allowed by the user");
+				notifications.warning("Please click anywhere on the page to enable video playback.", "Playback Blocked");
+			} else if (error.name === 'NotSupportedError') {
+				console.error("Video format not supported");
+				notifications.error("The video format is not supported by your browser.", "Playback Error");
+			} else {
+				console.error("Error playing video:", error);
+				if (retryCount >= MAX_PLAY_RETRIES) {
+					console.error("Max retries reached, giving up on video playback");
+				}
+			}
+		}
 	}
 
 	// DOM elements for call modal
@@ -1306,6 +1338,12 @@ document.addEventListener('DOMContentLoaded', function() {
 			callTimeout = null;
 		}
 		
+		// Clear any pending video play attempts
+		if (playVideoTimeout) {
+			clearTimeout(playVideoTimeout);
+			playVideoTimeout = null;
+		}
+		
 		// Store the call ID before we clear it
 		const callId = currentCall ? currentCall.callId : null;
 		
@@ -1324,6 +1362,7 @@ document.addEventListener('DOMContentLoaded', function() {
 				remoteStream = null;
 			}
 			
+			// Properly clear remote video
 			if (remoteVideo) {
 				// Clear the event handler to prevent it from firing on a cleared stream
 				remoteVideo.onloadedmetadata = null;
