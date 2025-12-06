@@ -909,11 +909,15 @@ document.addEventListener('DOMContentLoaded', function() {
 		// Handle remote stream
 		peerConnection.ontrack = event => {
 			console.log("Remote track received:", event);
-			remoteStream = event.streams[0];
-			remoteVideo.srcObject = remoteStream;
-			callStatus.textContent = `Connected with ${displayName}`;
-			notifications.success(`Connected with ${displayName}`, "Call Connected");
-			currentCall = { userId, displayName, callId };
+			if (event.streams && event.streams.length > 0) {
+				remoteStream = event.streams[0];
+				remoteVideo.srcObject = remoteStream;
+				callStatus.textContent = `Connected with ${displayName}`;
+				notifications.success(`Connected with ${displayName}`, "Call Connected");
+				
+				// Set currentCall only after successful connection
+				currentCall = { userId, displayName, callId };
+			}
 		};
 		
 		// Handle ICE candidates
@@ -977,6 +981,7 @@ document.addEventListener('DOMContentLoaded', function() {
 							peerConnection.setRemoteDescription(answer)
 								.then(() => {
 									console.log("Remote description set successfully");
+									// Set currentCall only after successful connection
 									currentCall = { userId, displayName, callId };
 								})
 								.catch(error => {
@@ -1080,7 +1085,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
 	// Accept incoming call
 	function acceptCall() {
-		if (!incomingCallData) return;
+		// Make a copy of the incoming call data to use throughout the function
+		const callData = incomingCallData;
+		
+		if (!callData) return;
 		
 		// Clear timeout
 		if (callTimeout) {
@@ -1092,8 +1100,8 @@ document.addEventListener('DOMContentLoaded', function() {
 		incomingCallModal.classList.remove('show');
 		
 		// Update UI
-		callStatus.textContent = `Connecting with ${incomingCallData.fromName}...`;
-		remoteVideoLabel.textContent = incomingCallData.fromName;
+		callStatus.textContent = `Connecting with ${callData.fromName}...`;
+		remoteVideoLabel.textContent = callData.fromName;
 		
 		// Initialize peer connection
 		peerConnection = new RTCPeerConnection(configuration);
@@ -1109,12 +1117,14 @@ document.addEventListener('DOMContentLoaded', function() {
 			if (event.streams && event.streams.length > 0) {
 				remoteStream = event.streams[0];
 				remoteVideo.srcObject = remoteStream;
-				callStatus.textContent = `Connected with ${incomingCallData.fromName}`;
-				notifications.success(`Connected with ${incomingCallData.fromName}`, "Call Connected");
+				callStatus.textContent = `Connected with ${callData.fromName}`;
+				notifications.success(`Connected with ${callData.fromName}`, "Call Connected");
+				
+				// Set currentCall only after successful connection
 				currentCall = { 
-					userId: incomingCallData.from, 
-					displayName: incomingCallData.fromName,
-					callId: incomingCallData.callId
+					userId: callData.from, 
+					displayName: callData.fromName,
+					callId: callData.callId
 				};
 			}
 		};
@@ -1123,7 +1133,7 @@ document.addEventListener('DOMContentLoaded', function() {
 		peerConnection.onicecandidate = event => {
 			if (event.candidate) {
 				// Send ICE candidate to remote peer via Firebase
-				database.ref(`calls/${incomingCallData.callId}/iceCandidates/${currentUser.uid}`).push({
+				database.ref(`calls/${callData.callId}/iceCandidates/${currentUser.uid}`).push({
 					candidate: event.candidate
 				});
 			}
@@ -1142,8 +1152,8 @@ document.addEventListener('DOMContentLoaded', function() {
 		try {
 			// Create a proper RTCSessionDescription object
 			const offer = new RTCSessionDescription({
-				type: incomingCallData.offer.type || 'offer',
-				sdp: incomingCallData.offer.sdp || incomingCallData.offer
+				type: callData.offer.type || 'offer',
+				sdp: callData.offer.sdp || callData.offer
 			});
 			
 			// Set remote description and create answer
@@ -1159,7 +1169,7 @@ document.addEventListener('DOMContentLoaded', function() {
 				.then(() => {
 					console.log("Local description set successfully");
 					// Send answer to caller via Firebase
-					database.ref(`calls/${incomingCallData.callId}/answer`).set({
+					database.ref(`calls/${callData.callId}/answer`).set({
 						answer: {
 							type: peerConnection.localDescription.type,
 							sdp: peerConnection.localDescription.sdp
@@ -1167,7 +1177,7 @@ document.addEventListener('DOMContentLoaded', function() {
 					});
 					
 					// Listen for ICE candidates from caller
-					database.ref(`calls/${incomingCallData.callId}/iceCandidates/${incomingCallData.from}`).on('child_added', snapshot => {
+					database.ref(`calls/${callData.callId}/iceCandidates/${callData.from}`).on('child_added', snapshot => {
 						if (snapshot.exists()) {
 							const candidate = snapshot.val().candidate;
 							peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
@@ -1187,7 +1197,7 @@ document.addEventListener('DOMContentLoaded', function() {
 			incomingCallModal.classList.remove('show');
 		}
 		
-		incomingCallData = null;
+		// Don't set incomingCallData to null here - let endCall handle it
 	}
 
 	// Reject incoming call
@@ -1217,6 +1227,9 @@ document.addEventListener('DOMContentLoaded', function() {
 			callTimeout = null;
 		}
 		
+		// Store the call ID before we clear it
+		const callId = currentCall ? currentCall.callId : null;
+		
 		if (currentCall) {
 			console.log("Ending call with ID:", currentCall.callId);
 			
@@ -1245,10 +1258,15 @@ document.addEventListener('DOMContentLoaded', function() {
 			notifications.info("Call ended", "Call Status");
 		}
 		
-		// Also clear any incoming call
+		// Clear any incoming call
 		if (incomingCallData) {
 			incomingCallData = null;
 			incomingCallModal.classList.remove('show');
+		}
+		
+		// If we had a call ID but no currentCall (e.g., call was rejected), clean it up
+		if (callId && !currentCall) {
+			database.ref(`calls/${callId}`).remove();
 		}
 	}
 
@@ -1294,7 +1312,7 @@ document.addEventListener('DOMContentLoaded', function() {
 	function generateCallId() {
 		return Date.now().toString(36) + Math.random().toString(36).substr(2);
 	}
-
+	
 	// Listen for incoming calls
 	function listenForIncomingCalls() {
 		// Use child_added instead of on for better handling
@@ -1306,7 +1324,7 @@ document.addEventListener('DOMContentLoaded', function() {
 				console.log("Incoming call detected:", callData);
 				
 				// Only handle incoming calls (where current user is recipient)
-				if (callData.to === currentUser.uid && !currentCall) {
+				if (callData.to === currentUser.uid && !currentCall && !incomingCallData) {
 					// Add call ID to the data
 					callData.callId = callId;
 					
@@ -1325,12 +1343,18 @@ document.addEventListener('DOMContentLoaded', function() {
 		// Also listen for call removals (when a call ends)
 		database.ref('calls').on('child_removed', snapshot => {
 			const callId = snapshot.key;
-			const callData = snapshot.val();
 			
 			// If this was our call and it's been removed, end our call
 			if (currentCall && currentCall.callId === callId) {
 				console.log("Call was removed from Firebase, ending call");
 				endCall();
+			}
+			
+			// If this was an incoming call and it's been removed, clear incoming call data
+			if (incomingCallData && incomingCallData.callId === callId) {
+				console.log("Incoming call was removed from Firebase");
+				incomingCallData = null;
+				incomingCallModal.classList.remove('show');
 			}
 		});
 	}
