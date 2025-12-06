@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>aa-echo</title>
-    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
-    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="favicons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicons/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="favicons/favicon-16x16.png">
     <link rel="manifest" href="manifest.json">
     <link rel="stylesheet" href="style.css">
 </head>
@@ -198,6 +198,25 @@
             </main>
         </section>
     </div>
+	
+	<!-- Incoming Call Modal -->
+	<div id="incoming-call-modal" class="modal">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h3>Incoming Call</h3>
+			</div>
+			<div class="modal-body">
+				<div class="caller-info">
+					<div class="caller-avatar" id="caller-avatar"></div>
+					<div class="caller-name" id="caller-name">Unknown User</div>
+				</div>
+				<div class="call-actions">
+					<button id="accept-call-btn" class="call-btn accept">Accept</button>
+					<button id="reject-call-btn" class="call-btn reject">Reject</button>
+				</div>
+			</div>
+		</div>
+	</div>
     
     <!-- Firebase SDK -->
     <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
@@ -210,5 +229,4 @@
     <!-- Custom Notification Container -->
     <div id="notification-container" class="notification-container"></div>
 </body>
-
 </html>
