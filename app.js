@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', function() {
     // ====================================================================================================
-    // FIREBASE INITIALIZATION
+    // FIREBASE AND WEBRTC INITIALIZATION
     // ====================================================================================================
     
     // Firebase configuration
@@ -18,6 +18,21 @@ document.addEventListener('DOMContentLoaded', function() {
     firebase.initializeApp(firebaseConfig);
     const auth = firebase.auth();
     const database = firebase.database();
+	
+	// WebRTC configuration
+	const configuration = {
+		iceServers: [
+			{ urls: 'stun:stun.l.google.com:19302' },
+			{ urls: 'stun:stun1.l.google.com:19302' },
+			{ urls: 'stun:stun2.l.google.com:19302' },
+			{ urls: 'stun:stun3.l.google.com:19302' },
+			{ 
+				urls: 'turn:turn.cloudflare.com:3478',
+				username: 'test',
+				credential: 'test'
+			}
+		]
+	};
 
     // Set auth persistence
     auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
@@ -27,6 +42,7 @@ document.addEventListener('DOMContentLoaded', function() {
         .catch((error) => {
             console.error("📎❌ Error setting auth persistence:", error);
         });
+
 
     // ====================================================================================================
     // GLOBAL VARIABLES AND STATE MANAGEMENT
@@ -88,14 +104,6 @@ document.addEventListener('DOMContentLoaded', function() {
     let isVideoOff = false;
     let allUsers = {};
     let collapsedSections = {};
-
-    // WebRTC configuration
-    const configuration = {
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-    };
 	
 	// ====================================================================================================
 	// UTILITY FUNCTIONS
@@ -868,17 +876,54 @@ document.addEventListener('DOMContentLoaded', function() {
 	// Setup media (camera and microphone)
 	async function setupMedia() {
 		try {
-			localStream = await navigator.mediaDevices.getUserMedia({ 
-				video: true, 
-				audio: true 
-			});
+			// Use more specific constraints
+			const constraints = {
+				video: {
+					width: { ideal: 1280, max: 1920 },
+					height: { ideal: 720, max: 1080 },
+					frameRate: { ideal: 30, max: 30 }
+				},
+				audio: {
+					echoCancellation: true,
+					noiseSuppression: true,
+					autoGainControl: true
+				}
+			};
+			
+			localStream = await navigator.mediaDevices.getUserMedia(constraints);
 			localVideo.srcObject = localStream;
+			
+			// After setting srcObject, try to restart the stream
+			remoteVideo.srcObject = remoteStream;
+			remoteVideo.load(); // Force reload
+			remoteVideo.play().then(() => {
+				console.log("Remote video playing successfully");
+			}).catch(e => {
+				console.error("Error playing remote video:", e);
+				// Try alternative method
+				setTimeout(() => {
+					remoteVideo.play().catch(err => {
+						console.error("Still can't play video:", err);
+					});
+				}, 1000);
+			});
 			
 			// Test microphone access
 			const audioTracks = localStream.getAudioTracks();
 			if (audioTracks.length === 0) {
 				notifications.warning("No microphone detected. You won't be able to speak in calls.", "Microphone Warning");
 			}
+			
+			// Test camera access
+			const videoTracks = localStream.getVideoTracks();
+			if (videoTracks.length === 0) {
+				notifications.warning("No camera detected. You won't be able to send video.", "Camera Warning");
+			}
+			
+			console.log("Local media setup successful:", {
+				audioTracks: audioTracks.length,
+				videoTracks: videoTracks.length
+			});
 		} catch (error) {
 			console.error("Error accessing media devices:", error);
 			notifications.error("Could not access camera/microphone. Please check permissions.", "Media Error");
@@ -907,17 +952,31 @@ document.addEventListener('DOMContentLoaded', function() {
 		});
 		
 		// Handle remote stream
-		peerConnection.ontrack = event => {
+		peerConnection.ontrack = (event) => {
 			console.log("Remote track received:", event);
-			if (event.streams && event.streams.length > 0) {
-				remoteStream = event.streams[0];
-				remoteVideo.srcObject = remoteStream;
-				callStatus.textContent = `Connected with ${displayName}`;
-				notifications.success(`Connected with ${displayName}`, "Call Connected");
-				
-				// Set currentCall only after successful connection
-				currentCall = { userId, displayName, callId };
-			}
+			console.log("Streams:", event.streams);
+			console.log("Track:", event.track);
+			
+			// Wait a moment for the stream to be fully ready
+			setTimeout(() => {
+				if (event.streams && event.streams.length > 0) {
+					remoteStream = event.streams[0];
+					
+					// Check if the stream has tracks
+					if (remoteStream.getAudioTracks().length > 0 || remoteStream.getVideoTracks().length > 0) {
+						remoteVideo.srcObject = remoteStream;
+						remoteVideo.play().catch(e => {
+							console.error("Error playing remote video:", e);
+						});
+						
+						callStatus.textContent = `Connected with ${displayName}`;
+						notifications.success(`Connected with ${displayName}`, "Call Connected");
+						currentCall = { userId, displayName, callId };
+					} else {
+						console.error("Remote stream has no tracks");
+					}
+				}
+			}, 100); // Small delay to ensure stream is ready
 		};
 		
 		// Handle ICE candidates
@@ -1017,6 +1076,28 @@ document.addEventListener('DOMContentLoaded', function() {
 			callStatus.textContent = "Failed to create call";
 			notifications.error("Failed to initialize call", "Call Error");
 		}
+		
+		// Add connection timeout
+		const connectionTimeout = setTimeout(() => {
+			if (peerConnection.connectionState !== 'connected') {
+				console.error("Connection timeout");
+				notifications.error("Connection failed. Please try again.", "Connection Error");
+				endCall();
+			}
+		}, 15000); // 15 seconds timeout
+
+		// Clear timeout when connection is established
+		peerConnection.onconnectionstatechange = () => {
+			console.log("Connection state:", peerConnection.connectionState);
+			if (peerConnection.connectionState === 'connected') {
+				clearTimeout(connectionTimeout);
+			} else if (peerConnection.connectionState === 'disconnected' || 
+					   peerConnection.connectionState === 'failed' || 
+					   peerConnection.connectionState === 'closed') {
+				clearTimeout(connectionTimeout);
+				endCall();
+			}
+		};
 	}
 
 	// Answer a call
@@ -1036,6 +1117,38 @@ document.addEventListener('DOMContentLoaded', function() {
 		
 		incomingCallData = callData;
 		
+		// Handle remote stream
+		peerConnection.ontrack = (event) => {
+			console.log("Remote track received:", event);
+			console.log("Streams:", event.streams);
+			console.log("Track:", event.track);
+			
+			// Wait a moment for the stream to be fully ready
+			setTimeout(() => {
+				if (event.streams && event.streams.length > 0) {
+					remoteStream = event.streams[0];
+					
+					// Check if the stream has tracks
+					if (remoteStream.getAudioTracks().length > 0 || remoteStream.getVideoTracks().length > 0) {
+						remoteVideo.srcObject = remoteStream;
+						remoteVideo.play().catch(e => {
+							console.error("Error playing remote video:", e);
+						});
+						
+						callStatus.textContent = `Connected with ${callData.fromName}`;
+						notifications.success(`Connected with ${callData.fromName}`, "Call Connected");
+						currentCall = { 
+							userId: callData.from, 
+							displayName: callData.fromName,
+							callId: callData.callId
+						};
+					} else {
+						console.error("Remote stream has no tracks");
+					}
+				}
+			}, 100); // Small delay to ensure stream is ready
+		};
+		
 		// Show incoming call modal
 		callerName.textContent = callData.fromName || 'Unknown User';
 		const avatarText = callData.fromName ? 
@@ -1049,6 +1162,28 @@ document.addEventListener('DOMContentLoaded', function() {
 				rejectCall();
 			}
 		}, 30000);
+		
+		// Add connection timeout
+		const connectionTimeout = setTimeout(() => {
+			if (peerConnection.connectionState !== 'connected') {
+				console.error("Connection timeout");
+				notifications.error("Connection failed. Please try again.", "Connection Error");
+				endCall();
+			}
+		}, 15000); // 15 seconds timeout
+
+		// Clear timeout when connection is established
+		peerConnection.onconnectionstatechange = () => {
+			console.log("Connection state:", peerConnection.connectionState);
+			if (peerConnection.connectionState === 'connected') {
+				clearTimeout(connectionTimeout);
+			} else if (peerConnection.connectionState === 'disconnected' || 
+					   peerConnection.connectionState === 'failed' || 
+					   peerConnection.connectionState === 'closed') {
+				clearTimeout(connectionTimeout);
+				endCall();
+			}
+		};
 	}
 
 	// Answer a call
@@ -1482,4 +1617,31 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initialize collapsed sections
     initCollapsedSections();
     applyCollapsedStates();
+	
+    // ====================================================================================================
+    // DEBUGGING
+    // ====================================================================================================
+	
+	// Debug remote media
+	function debugRemoteMedia() {
+		if (remoteVideo && remoteVideo.srcObject) {
+			const stream = remoteVideo.srcObject;
+			console.log("Remote video debug:", {
+				hasStream: !!stream,
+				streamActive: stream && stream.active,
+				audioTracks: stream ? stream.getAudioTracks().length : 0,
+				videoTracks: stream ? stream.getVideoTracks().length : 0,
+				videoElementState: remoteVideo.readyState,
+				videoElementPaused: remoteVideo.paused,
+				currentTime: remoteVideo.currentTime
+			});
+		}
+	}
+
+	// Call this periodically to debug
+	setInterval(() => {
+		if (currentCall) {
+			debugRemoteMedia();
+		}
+	}, 2000);
 });
