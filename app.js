@@ -317,34 +317,6 @@ document.addEventListener('DOMContentLoaded', function() {
         localStorage.setItem('collapsedSections', JSON.stringify(collapsedSections));
         applyCollapsedStates();
     }
-	
-	// Safely set/play streams
-	async function setAndPlayVideoStream(videoElement, stream) {
-		if (!videoElement || !stream) return;
-		
-		try {
-			// Pause the video first to stop any current playback
-			videoElement.pause();
-			
-			// Set the new stream
-			videoElement.srcObject = stream;
-			
-			// Wait for the metadata to load
-			await videoElement.play();
-		} catch (error) {
-			if (error.name === 'AbortError') {
-				console.log("Video play was aborted, retrying...");
-				// Retry after a short delay
-				setTimeout(() => {
-					videoElement.play().catch(err => {
-						console.error("Still can't play video:", err);
-					});
-				}, 300);
-			} else {
-				console.error("Error playing video:", error);
-			}
-		}
-	}
 
     // ====================================================================================================
     // AUTHENTICATION FUNCTIONS
@@ -890,6 +862,60 @@ document.addEventListener('DOMContentLoaded', function() {
 	// CALLING FUNCTIONS
 	// ====================================================================================================
 
+	// A variable to hold the timeout ID for debouncing video play requests
+	let playVideoTimeout = null;
+
+	/**
+	 * Safely sets a new stream on a video element and plays it.
+	 * This function is debounced to prevent race conditions from rapid ontrack events.
+	 * @param {HTMLVideoElement} videoElement The video element to control.
+	 * @param {MediaStream} stream The media stream to play.
+	 */
+	function setAndPlayVideoStream(videoElement, stream) {
+		if (!videoElement || !stream) {
+			console.warn("setAndPlayVideoStream called with invalid element or stream");
+			return;
+		}
+
+		// Debounce: Clear any previous attempt to play video
+		if (playVideoTimeout) {
+			clearTimeout(playVideoTimeout);
+		}
+
+		playVideoTimeout = setTimeout(async () => {
+			try {
+				// Pause the video first to stop any current playback
+				videoElement.pause();
+				
+				// Set the new stream
+				videoElement.srcObject = stream;
+				
+				// Wait for the metadata to load
+				await new Promise((resolve, reject) => {
+					videoElement.onloadedmetadata = resolve;
+					videoElement.onerror = reject;
+					
+					// Set a timeout in case the metadata never loads
+					setTimeout(() => reject(new Error('Metadata load timeout')), 5000);
+				});
+				
+				// Try to play the video
+				await videoElement.play();
+				console.log("Remote video playing successfully");
+			} catch (error) {
+				if (error.name === 'AbortError') {
+					console.log("Video play was aborted, retrying...");
+					// Retry after a short delay
+					setTimeout(() => {
+						setAndPlayVideoStream(videoElement, stream);
+					}, 300);
+				} else {
+					console.error("Error playing video:", error);
+				}
+			}
+		}, 100); // Debounce for 100ms
+	}
+
 	// DOM elements for call modal
 	const incomingCallModal = document.getElementById('incoming-call-modal');
 	const callerAvatar = document.getElementById('caller-avatar');
@@ -964,24 +990,19 @@ document.addEventListener('DOMContentLoaded', function() {
 			peerConnection.addTrack(track, localStream);
 		});
 		
-		// Handle remote stream
+		// Find this section inside startCall()
 		peerConnection.ontrack = (event) => {
 			console.log("Remote track received:", event);
 			
 			if (event.streams && event.streams.length > 0) {
 				remoteStream = event.streams[0];
 				
-				// Check if the stream has tracks
-				if (remoteStream.getAudioTracks().length > 0 || remoteStream.getVideoTracks().length > 0) {
-					// Use our utility function to safely set and play the video
-					setAndPlayVideoStream(remoteVideo, remoteStream);
-					
-					callStatus.textContent = `Connected with ${displayName}`;
-					notifications.success(`Connected with ${displayName}`, "Call Connected");
-					currentCall = { userId, displayName, callId };
-				} else {
-					console.error("Remote stream has no tracks");
-				}
+				// Use the new, robust utility function
+				setAndPlayVideoStream(remoteVideo, remoteStream);
+				
+				callStatus.textContent = `Connected with ${displayName}`;
+				notifications.success(`Connected with ${displayName}`, "Call Connected");
+				currentCall = { userId, displayName, callId };
 			}
 		};
 		
@@ -1123,81 +1144,6 @@ document.addEventListener('DOMContentLoaded', function() {
 		
 		incomingCallData = callData;
 		
-		// Handle remote stream
-		peerConnection.ontrack = event => {
-			console.log("Remote track received:", event);
-			if (event.streams && event.streams.length > 0) {
-				remoteStream = event.streams[0];
-				
-				// Use our utility function to safely set and play the video
-				setAndPlayVideoStream(remoteVideo, remoteStream);
-				
-				callStatus.textContent = `Connected with ${callData.fromName}`;
-				notifications.success(`Connected with ${callData.fromName}`, "Call Connected");
-				
-				// Set currentCall only after successful connection
-				currentCall = { 
-					userId: callData.from, 
-					displayName: callData.fromName,
-					callId: callData.callId
-				};
-			}
-		};
-		
-		// Show incoming call modal
-		callerName.textContent = callData.fromName || 'Unknown User';
-		const avatarText = callData.fromName ? 
-			callData.fromName.charAt(0).toUpperCase() : 'U';
-		callerAvatar.textContent = avatarText;
-		incomingCallModal.classList.add('show');
-		
-		// Auto-reject after 30 seconds if not answered
-		callTimeout = setTimeout(() => {
-			if (incomingCallData) {
-				rejectCall();
-			}
-		}, 30000);
-		
-		// Add connection timeout
-		const connectionTimeout = setTimeout(() => {
-			if (peerConnection.connectionState !== 'connected') {
-				console.error("Connection timeout");
-				notifications.error("Connection failed. Please try again.", "Connection Error");
-				endCall();
-			}
-		}, 15000); // 15 seconds timeout
-
-		// Clear timeout when connection is established
-		peerConnection.onconnectionstatechange = () => {
-			console.log("Connection state:", peerConnection.connectionState);
-			if (peerConnection.connectionState === 'connected') {
-				clearTimeout(connectionTimeout);
-			} else if (peerConnection.connectionState === 'disconnected' || 
-					   peerConnection.connectionState === 'failed' || 
-					   peerConnection.connectionState === 'closed') {
-				clearTimeout(connectionTimeout);
-				endCall();
-			}
-		};
-	}
-
-	// Answer a call
-	function answerCall(callData) {
-		if (currentCall) {
-			// Already in a call, reject this one
-			database.ref(`calls/${callData.callId}`).remove();
-			return;
-		}
-		
-		// Validate call data
-		if (!callData || !callData.offer) {
-			console.error("Invalid call data received:", callData);
-			notifications.error("Invalid call data received", "Call Error");
-			return;
-		}
-		
-		incomingCallData = callData;
-		
 		// Show incoming call modal
 		callerName.textContent = callData.fromName || 'Unknown User';
 		const avatarText = callData.fromName ? 
@@ -1246,7 +1192,10 @@ document.addEventListener('DOMContentLoaded', function() {
 			console.log("Remote track received:", event);
 			if (event.streams && event.streams.length > 0) {
 				remoteStream = event.streams[0];
-				remoteVideo.srcObject = remoteStream;
+				
+				// Use the safe video stream setting function
+				setAndPlayVideoStream(remoteVideo, remoteStream);
+				
 				callStatus.textContent = `Connected with ${callData.fromName}`;
 				notifications.success(`Connected with ${callData.fromName}`, "Call Connected");
 				
@@ -1375,10 +1324,13 @@ document.addEventListener('DOMContentLoaded', function() {
 				remoteStream = null;
 			}
 			
-			// Properly clear remote video
 			if (remoteVideo) {
-				remoteVideo.pause();
+				// Clear the event handler to prevent it from firing on a cleared stream
+				remoteVideo.onloadedmetadata = null;
+				// Set srcObject to null to stop the stream
 				remoteVideo.srcObject = null;
+				// Pause the element to ensure it's in a neutral state
+				remoteVideo.pause();
 			}
 			
 			remoteVideoLabel.textContent = "Waiting for connection...";
