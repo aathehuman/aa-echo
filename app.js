@@ -106,13 +106,47 @@ document.addEventListener('DOMContentLoaded', function() {
     let collapsedSections = {};
 	
 	// ====================================================================================================
+	
+	// Add this after the DOM elements section
+	const debugPlayBtn = document.createElement('button');
+	debugPlayBtn.textContent = 'Debug: Play Video';
+	debugPlayBtn.style.position = 'fixed';
+	debugPlayBtn.style.bottom = '10px';
+	debugPlayBtn.style.right = '10px';
+	debugPlayBtn.style.zIndex = '9999';
+	debugPlayBtn.style.padding = '10px';
+	debugPlayBtn.style.backgroundColor = '#ff0000';
+	debugPlayBtn.style.color = '#ffffff';
+	debugPlayBtn.style.border = 'none';
+	debugPlayBtn.style.borderRadius = '5px';
+	debugPlayBtn.style.cursor = 'pointer';
+	document.body.appendChild(debugPlayBtn);
+
+	debugPlayBtn.addEventListener('click', () => {
+		if (remoteVideo && remoteVideo.srcObject) {
+			console.log("Manual play attempt");
+			remoteVideo.load();
+			remoteVideo.play().catch(e => {
+				console.error("Manual play failed:", e);
+			});
+		}
+	});
+	
+	// ====================================================================================================
 	// UTILITY FUNCTIONS
 	// ====================================================================================================
 	
-	// iOS Helper
+	// Activity helper ig
 	document.addEventListener('click', function() {
 		// Check if we have a remote video that's not playing
 		if (remoteVideo && remoteVideo.srcObject && remoteVideo.paused) {
+			// Try to reload the video element first
+			if (remoteVideo.readyState === 0) {
+				console.log("Reloading video element after user interaction");
+				remoteVideo.load();
+			}
+			
+			// Then try to play
 			remoteVideo.play().catch(e => {
 				console.log("Could not resume video after user interaction:", e);
 			});
@@ -868,622 +902,392 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-	// ====================================================================================================
-	// CALLING FUNCTIONS
-	// ====================================================================================================
+    // ====================================================================================================
+    // CALLING FUNCTIONS
+    // ====================================================================================================
 
-	// A variable to hold the timeout ID for debouncing video play requests
-	let playVideoTimeout = null;
-	let playRetryCount = 0;
-	const MAX_PLAY_RETRIES = 3;
+    // DOM elements for call modal
+    const incomingCallModal = document.getElementById('incoming-call-modal');
+    const callerAvatar = document.getElementById('caller-avatar');
+    const callerName = document.getElementById('caller-name');
+    const acceptCallBtn = document.getElementById('accept-call-btn');
+    const rejectCallBtn = document.getElementById('reject-call-btn');
 
-	/**
-	 * Safely sets a new stream on a video element and plays it.
-	 * This function is debounced to prevent race conditions from rapid ontrack events.
-	 * @param {HTMLVideoElement} videoElement The video element to control.
-	 * @param {MediaStream} stream The media stream to play.
-	 */
-	function setAndPlayVideoStream(videoElement, stream) {
-		if (!videoElement || !stream) {
-			console.warn("setAndPlayVideoStream called with invalid element or stream");
-			return;
-		}
+    // State variables for calls
+    let incomingCallData = null;
+    let callTimeout = null;
 
-		// Debounce: Clear any previous attempt to play video
-		if (playVideoTimeout) {
-			clearTimeout(playVideoTimeout);
-		}
+    // Setup media (camera and microphone)
+    async function setupMedia() {
+        try {
+            const constraints = {
+                video: {
+                    width: { ideal: 1280, max: 1920 },
+                    height: { ideal: 720, max: 1080 },
+                    frameRate: { ideal: 30, max: 30 }
+                },
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            };
+            
+            localStream = await navigator.mediaDevices.getUserMedia(constraints);
+            localVideo.srcObject = localStream;
+            
+            console.log("Local media setup successful:", {
+                audioTracks: localStream.getAudioTracks().length,
+                videoTracks: localStream.getVideoTracks().length
+            });
+        } catch (error) {
+            console.error("Error accessing media devices:", error);
+            notifications.error("Could not access camera/microphone. Please check permissions.", "Media Error");
+        }
+    }
 
-		playVideoTimeout = setTimeout(async () => {
-			try {
-				// Set the new stream
-				videoElement.srcObject = stream;
-				
-				// Reset retry count
-				playRetryCount = 0;
-				
-				// Try to play the video
-				await attemptPlayVideo(videoElement);
-			} catch (error) {
-				console.error("Fatal error in setAndPlayVideoStream:", error);
-			}
-		}, 100); // Debounce for 100ms
-	}
+    // Start a call (as the initiator)
+    function startCall(userId, displayName) {
+        if (currentCall) {
+            notifications.warning("You're already in a call. End current call first.", "Call Active");
+            return;
+        }
+        
+        callStatus.textContent = `Calling ${displayName}...`;
+        remoteVideoLabel.textContent = displayName;
+        
+        const callId = generateCallId();
+        
+        // Initialize SimplePeer as the initiator
+        peerConnection = new SimplePeer({
+            initiator: true,
+            trickle: false, // We'll handle signaling ourselves via Firebase
+            stream: localStream,
+            config: configuration
+        });
+        
+        // 1. When SimplePeer generates a signal (the offer), send it to Firebase
+        peerConnection.on('signal', data => {
+            console.log("CALLER: Sending offer signal:", data);
+            database.ref(`calls/${callId}`).set({
+                offer: data, // Store the offer under the 'offer' key
+                from: currentUser.uid,
+                to: userId,
+                fromName: currentUser.displayName || 'Unknown User',
+                timestamp: firebase.database.ServerValue.TIMESTAMP
+            });
+        });
+        
+        // 2. When we receive the remote stream, play it
+        peerConnection.on('stream', stream => {
+            console.log("CALLER: Remote stream received");
+            remoteStream = stream;
+            remoteVideo.srcObject = stream;
+            remoteVideo.play().catch(e => console.error("Error playing remote video:", e));
+            
+            callStatus.textContent = `Connected with ${displayName}`;
+            notifications.success(`Connected with ${displayName}`, "Call Connected");
+            currentCall = { userId, displayName, callId };
+        });
+        
+        // 3. Handle connection state changes
+        peerConnection.on('connect', () => {
+            console.log("CALLER: Peer connection established");
+        });
+        
+        peerConnection.on('close', () => {
+            console.log("CALLER: Peer connection closed");
+            endCall();
+        });
+        
+        peerConnection.on('error', err => {
+            console.error("CALLER: Peer connection error:", err);
+            notifications.error("Connection error: " + err.message, "Connection Error");
+            endCall();
+        });
+        
+        // 4. Listen for the answer from the receiver at the 'answer' location
+        database.ref(`calls/${callId}/answer`).on('value', snapshot => {
+            if (snapshot.exists()) {
+                const answerData = snapshot.val();
+                console.log("CALLER: Answer received:", answerData);
+                
+                // Stop listening for answers after we get one
+                database.ref(`calls/${callId}/answer`).off();
+                
+                try {
+                    peerConnection.signal(answerData);
+                } catch (error) {
+                    console.error("CALLER: Error processing answer:", error);
+                }
+            }
+        });
+        
+        // Set up timeout for unanswered call
+        callTimeout = setTimeout(() => {
+            if (!currentCall) {
+                notifications.warning(`${displayName} didn't answer`, "Call Unanswered");
+                endCall();
+            }
+        }, 30000);
+    }
 
-	/**
-	 * Attempts to play a video element with retry logic for AbortError
-	 * @param {HTMLVideoElement} videoElement The video element to play
-	 * @param {number} retryCount Current retry attempt
-	 */
-	async function attemptPlayVideo(videoElement, retryCount = 0) {
-		try {
-			// Check if the video element is ready to play
-			if (videoElement.readyState < 2) { // HAVE_CURRENT_DATA
-				console.log("Video not ready, waiting...");
-				// Wait a bit and try again
-				setTimeout(() => attemptPlayVideo(videoElement, retryCount), 200);
-				return;
-			}
-			
-			// Try to play the video
-			await videoElement.play();
-			console.log("Remote video playing successfully");
-		} catch (error) {
-			if (error.name === 'AbortError' && retryCount < MAX_PLAY_RETRIES) {
-				console.log(`Video play was aborted, retrying (${retryCount + 1}/${MAX_PLAY_RETRIES})...`);
-				// Retry after a short delay
-				setTimeout(() => attemptPlayVideo(videoElement, retryCount + 1), 300);
-			} else if (error.name === 'NotAllowedError') {
-				console.warn("Video play was not allowed by the user");
-				notifications.warning("Please click anywhere on the page to enable video playback.", "Playback Blocked");
-			} else if (error.name === 'NotSupportedError') {
-				console.error("Video format not supported");
-				notifications.error("The video format is not supported by your browser.", "Playback Error");
-			} else {
-				console.error("Error playing video:", error);
-				if (retryCount >= MAX_PLAY_RETRIES) {
-					console.error("Max retries reached, giving up on video playback");
-				}
-			}
-		}
-	}
+    // This function now ONLY shows the incoming call UI. The actual work is in acceptCall.
+    function answerCall(callData) {
+        if (currentCall) {
+            // Already in a call, reject this one by removing it from Firebase
+            database.ref(`calls/${callData.callId}`).remove();
+            return;
+        }
+        
+        if (!callData || !callData.offer) {
+            console.error("Invalid call data received:", callData);
+            notifications.error("Invalid call data received", "Call Error");
+            return;
+        }
+        
+        incomingCallData = callData;
+        
+        // Show incoming call modal
+        callerName.textContent = callData.fromName || 'Unknown User';
+        const avatarText = callData.fromName ? 
+            callData.fromName.charAt(0).toUpperCase() : 'U';
+        callerAvatar.textContent = avatarText;
+        incomingCallModal.classList.add('show');
+        
+        // Auto-reject after 30 seconds if not answered
+        callTimeout = setTimeout(() => {
+            if (incomingCallData) {
+                rejectCall();
+            }
+        }, 30000);
+    }
 
-	// DOM elements for call modal
-	const incomingCallModal = document.getElementById('incoming-call-modal');
-	const callerAvatar = document.getElementById('caller-avatar');
-	const callerName = document.getElementById('caller-name');
-	const acceptCallBtn = document.getElementById('accept-call-btn');
-	const rejectCallBtn = document.getElementById('reject-call-btn');
+    // Accept an incoming call (as the receiver)
+    function acceptCall() {
+        const callData = incomingCallData;
+        if (!callData) return;
+        
+        // Clear the auto-reject timeout
+        if (callTimeout) {
+            clearTimeout(callTimeout);
+            callTimeout = null;
+        }
+        
+        // Hide the modal
+        incomingCallModal.classList.remove('show');
+        callStatus.textContent = `Connecting with ${callData.fromName}...`;
+        remoteVideoLabel.textContent = callData.fromName;
+        
+        // Initialize SimplePeer as the receiver (not the initiator)
+        peerConnection = new SimplePeer({
+            initiator: false,
+            trickle: false,
+            stream: localStream,
+            config: configuration
+        });
+        
+        // 1. When SimplePeer generates a signal (the answer), send it to Firebase
+        peerConnection.on('signal', data => {
+            console.log("RECEIVER: Sending answer signal:", data);
+            database.ref(`calls/${callData.callId}/answer`).set(data);
+        });
+        
+        // 2. When we receive the remote stream, play it
+        peerConnection.on('stream', stream => {
+            console.log("RECEIVER: Remote stream received");
+            remoteStream = stream;
+            remoteVideo.srcObject = stream;
+            remoteVideo.play().catch(e => console.error("Error playing remote video:", e));
+            
+            callStatus.textContent = `Connected with ${callData.fromName}`;
+            notifications.success(`Connected with ${callData.fromName}`, "Call Connected");
+            currentCall = { 
+                userId: callData.from, 
+                displayName: callData.fromName,
+                callId: callData.callId
+            };
+        });
+        
+        // 3. Handle connection state changes
+        peerConnection.on('connect', () => {
+            console.log("RECEIVER: Peer connection established");
+        });
+        
+        peerConnection.on('close', () => {
+            console.log("RECEIVER: Peer connection closed");
+            endCall();
+        });
+        
+        peerConnection.on('error', err => {
+            console.error("RECEIVER: Peer connection error:", err);
+            notifications.error("Connection error: " + err.message, "Connection Error");
+            endCall();
+        });
+        
+        // 4. Process the offer from the caller
+        try {
+            console.log("RECEIVER: Processing offer:", callData.offer);
+            peerConnection.signal(callData.offer);
+        } catch (error) {
+            console.error("RECEIVER: Error processing offer:", error);
+            endCall();
+        }
+    }
 
-	// State variables for calls
-	let incomingCallData = null;
-	let callTimeout = null;
+    // Reject an incoming call
+    function rejectCall() {
+        if (!incomingCallData) return;
+        
+        if (callTimeout) {
+            clearTimeout(callTimeout);
+            callTimeout = null;
+        }
+        
+        incomingCallModal.classList.remove('show');
+        
+        // Remove the entire call entry from Firebase to signal rejection
+        database.ref(`calls/${incomingCallData.callId}`).remove();
+        
+        incomingCallData = null;
+    }
 
-	// Setup media (camera and microphone)
-	async function setupMedia() {
-		try {
-			// Use more specific constraints
-			const constraints = {
-				video: {
-					width: { ideal: 1280, max: 1920 },
-					height: { ideal: 720, max: 1080 },
-					frameRate: { ideal: 30, max: 30 }
-				},
-				audio: {
-					echoCancellation: true,
-					noiseSuppression: true,
-					autoGainControl: true
-				}
-			};
-			
-			localStream = await navigator.mediaDevices.getUserMedia(constraints);
-			localVideo.srcObject = localStream;
-			
-			// Test microphone access
-			const audioTracks = localStream.getAudioTracks();
-			if (audioTracks.length === 0) {
-				notifications.warning("No microphone detected. You won't be able to speak in calls.", "Microphone Warning");
-			}
-			
-			// Test camera access
-			const videoTracks = localStream.getVideoTracks();
-			if (videoTracks.length === 0) {
-				notifications.warning("No camera detected. You won't be able to send video.", "Camera Warning");
-			}
-			
-			console.log("Local media setup successful:", {
-				audioTracks: audioTracks.length,
-				videoTracks: videoTracks.length
-			});
-		} catch (error) {
-			console.error("Error accessing media devices:", error);
-			notifications.error("Could not access camera/microphone. Please check permissions.", "Media Error");
-		}
-	}
+    // End current call
+    function endCall() {
+        // Clear any pending timeout
+        if (callTimeout) {
+            clearTimeout(callTimeout);
+            callTimeout = null;
+        }
+        
+        const callId = currentCall ? currentCall.callId : null;
+        
+        if (currentCall) {
+            console.log("Ending call with ID:", currentCall.callId);
+            
+            // Clean up peer connection using SimplePeer's destroy method
+            if (peerConnection) {
+                peerConnection.destroy();
+                peerConnection = null;
+            }
+            
+            // Clean up remote stream
+            if (remoteStream) {
+                remoteStream.getTracks().forEach(track => track.stop());
+                remoteStream = null;
+            }
+            
+            // Clear remote video
+            if (remoteVideo) {
+                remoteVideo.pause();
+                remoteVideo.srcObject = null;
+            }
+            
+            remoteVideoLabel.textContent = "Waiting for connection...";
+            
+            // Remove call data from Firebase
+            database.ref(`calls/${currentCall.callId}`).remove();
+            
+            // Reset state
+            currentCall = null;
+            callStatus.textContent = "Ready to make calls";
+            notifications.info("Call ended", "Call Status");
+        }
+        
+        // Clear any incoming call
+        if (incomingCallData) {
+            incomingCallData = null;
+            incomingCallModal.classList.remove('show');
+        }
+        
+        // If we had a call ID but no currentCall (e.g., call was rejected), clean it up
+        if (callId && !currentCall) {
+            database.ref(`calls/${callId}`).remove();
+        }
+    }
 
-	// Start a call
-	function startCall(userId, displayName) {
-		if (currentCall) {
-			notifications.warning("You're already in a call. End current call first.", "Call Active");
-			return;
-		}
-		
-		callStatus.textContent = `Calling ${displayName}...`;
-		remoteVideoLabel.textContent = displayName;
-		
-		// Create a unique call ID
-		const callId = generateCallId();
-		
-		// Initialize peer connection
-		peerConnection = new RTCPeerConnection(configuration);
-		
-		// Add local stream to peer connection
-		localStream.getTracks().forEach(track => {
-			peerConnection.addTrack(track, localStream);
-		});
-		
-		// Find this section inside startCall()
-		peerConnection.ontrack = (event) => {
-			console.log("Remote track received:", event);
-			
-			if (event.streams && event.streams.length > 0) {
-				remoteStream = event.streams[0];
-				
-				// Use the new, robust utility function
-				setAndPlayVideoStream(remoteVideo, remoteStream);
-				
-				callStatus.textContent = `Connected with ${displayName}`;
-				notifications.success(`Connected with ${displayName}`, "Call Connected");
-				currentCall = { userId, displayName, callId };
-			}
-		};
-		
-		// Handle ICE candidates
-		peerConnection.onicecandidate = event => {
-			if (event.candidate) {
-				// Send ICE candidate to remote peer via Firebase
-				database.ref(`calls/${callId}/iceCandidates/${currentUser.uid}`).push({
-					candidate: event.candidate
-				});
-			}
-		};
-		
-		// Handle connection state changes
-		peerConnection.onconnectionstatechange = () => {
-			console.log("Connection state:", peerConnection.connectionState);
-			if (peerConnection.connectionState === 'disconnected' || 
-				peerConnection.connectionState === 'failed' || 
-				peerConnection.connectionState === 'closed') {
-				endCall();
-			}
-		};
-		
-		try {
-			// Create offer
-			peerConnection.createOffer()
-				.then(offer => {
-					console.log("Offer created successfully");
-					return peerConnection.setLocalDescription(offer);
-				})
-				.then(() => {
-					console.log("Local description set successfully");
-					// Send offer to remote peer via Firebase
-					database.ref(`calls/${callId}`).set({
-						offer: {
-							type: peerConnection.localDescription.type,
-							sdp: peerConnection.localDescription.sdp
-						},
-						from: currentUser.uid,
-						to: userId,
-						fromName: currentUser.displayName || 'Unknown User',
-						timestamp: firebase.database.ServerValue.TIMESTAMP
-					});
-					
-					// Set up listeners for response
-					database.ref(`calls/${callId}/answer`).on('value', snapshot => {
-						if (snapshot.exists() && !currentCall) {
-							const answerData = snapshot.val();
-							console.log("Answer received:", answerData);
-							
-							if (!answerData.answer) {
-								console.error("No answer data in response");
-								return;
-							}
-							
-							// Create a proper RTCSessionDescription object
-							const answer = new RTCSessionDescription({
-								type: answerData.answer.type || 'answer',
-								sdp: answerData.answer.sdp || answerData.answer
-							});
-							
-							peerConnection.setRemoteDescription(answer)
-								.then(() => {
-									console.log("Remote description set successfully");
-									// Set currentCall only after successful connection
-									currentCall = { userId, displayName, callId };
-								})
-								.catch(error => {
-									console.error("Error setting remote description:", error);
-									notifications.error("Failed to connect call", "Connection Error");
-								});
-						}
-					});
-					
-					// Listen for ICE candidates from remote peer
-					database.ref(`calls/${callId}/iceCandidates/${userId}`).on('child_added', snapshot => {
-						if (snapshot.exists()) {
-							const candidate = snapshot.val().candidate;
-							peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-						}
-					});
-					
-					// Set up timeout for unanswered call
-					callTimeout = setTimeout(() => {
-						if (!currentCall) {
-							notifications.warning(`${displayName} didn't answer`, "Call Unanswered");
-							endCall();
-						}
-					}, 30000); // 30 seconds
-				})
-				.catch(error => {
-					console.error("Error creating offer:", error);
-					callStatus.textContent = "Failed to create call";
-					notifications.error("Failed to create call. Please try again.", "Call Error");
-				});
-		} catch (error) {
-			console.error("Error in startCall:", error);
-			callStatus.textContent = "Failed to create call";
-			notifications.error("Failed to initialize call", "Call Error");
-		}
-		
-		// Add connection timeout
-		const connectionTimeout = setTimeout(() => {
-			if (peerConnection.connectionState !== 'connected') {
-				console.error("Connection timeout");
-				notifications.error("Connection failed. Please try again.", "Connection Error");
-				endCall();
-			}
-		}, 15000); // 15 seconds timeout
+    // Toggle mute
+    function toggleMute() {
+        if (!localStream) return;
+        
+        isMuted = !isMuted;
+        const audioTracks = localStream.getAudioTracks();
+        
+        audioTracks.forEach(track => {
+            track.enabled = !isMuted;
+        });
+        
+        muteBtn.textContent = isMuted ? '🔇' : '🎤';
+        muteBtn.classList.toggle('muted', isMuted);
+        notifications.info(isMuted ? "Microphone muted" : "Microphone unmuted", "Audio Status");
+    }
 
-		// Clear timeout when connection is established
-		peerConnection.onconnectionstatechange = () => {
-			console.log("Connection state:", peerConnection.connectionState);
-			if (peerConnection.connectionState === 'connected') {
-				clearTimeout(connectionTimeout);
-			} else if (peerConnection.connectionState === 'disconnected' || 
-					   peerConnection.connectionState === 'failed' || 
-					   peerConnection.connectionState === 'closed') {
-				clearTimeout(connectionTimeout);
-				endCall();
-			}
-		};
-	}
+    // Toggle video
+    function toggleVideo() {
+        if (!localStream) return;
+        
+        isVideoOff = !isVideoOff;
+        const videoTracks = localStream.getVideoTracks();
+        
+        videoTracks.forEach(track => {
+            track.enabled = !isVideoOff;
+        });
+        
+        videoBtn.textContent = isVideoOff ? '📹' : '📹'; // You might want different icons here
+        videoBtn.classList.toggle('muted', isVideoOff);
+        notifications.info(isVideoOff ? "Camera turned off" : "Camera turned on", "Video Status");
+    }
 
-	// Answer a call
-	function answerCall(callData) {
-		if (currentCall) {
-			// Already in a call, reject this one
-			database.ref(`calls/${callData.callId}`).remove();
-			return;
-		}
-		
-		// Validate call data
-		if (!callData || !callData.offer) {
-			console.error("Invalid call data received:", callData);
-			notifications.error("Invalid call data received", "Call Error");
-			return;
-		}
-		
-		incomingCallData = callData;
-		
-		// Show incoming call modal
-		callerName.textContent = callData.fromName || 'Unknown User';
-		const avatarText = callData.fromName ? 
-			callData.fromName.charAt(0).toUpperCase() : 'U';
-		callerAvatar.textContent = avatarText;
-		incomingCallModal.classList.add('show');
-		
-		// Auto-reject after 30 seconds if not answered
-		callTimeout = setTimeout(() => {
-			if (incomingCallData) {
-				rejectCall();
-			}
-		}, 30000);
-	}
-
-	// Accept incoming call
-	function acceptCall() {
-		// Make a copy of the incoming call data to use throughout the function
-		const callData = incomingCallData;
-		
-		if (!callData) return;
-		
-		// Clear timeout
-		if (callTimeout) {
-			clearTimeout(callTimeout);
-			callTimeout = null;
-		}
-		
-		// Hide modal
-		incomingCallModal.classList.remove('show');
-		
-		// Update UI
-		callStatus.textContent = `Connecting with ${callData.fromName}...`;
-		remoteVideoLabel.textContent = callData.fromName;
-		
-		// Initialize peer connection
-		peerConnection = new RTCPeerConnection(configuration);
-		
-		// Add local stream to peer connection
-		localStream.getTracks().forEach(track => {
-			peerConnection.addTrack(track, localStream);
-		});
-		
-		// Handle remote stream
-		peerConnection.ontrack = event => {
-			console.log("Remote track received:", event);
-			if (event.streams && event.streams.length > 0) {
-				remoteStream = event.streams[0];
-				
-				// Use the safe video stream setting function
-				setAndPlayVideoStream(remoteVideo, remoteStream);
-				
-				callStatus.textContent = `Connected with ${callData.fromName}`;
-				notifications.success(`Connected with ${callData.fromName}`, "Call Connected");
-				
-				// Set currentCall only after successful connection
-				currentCall = { 
-					userId: callData.from, 
-					displayName: callData.fromName,
-					callId: callData.callId
-				};
-			}
-		};
-		
-		// Handle ICE candidates
-		peerConnection.onicecandidate = event => {
-			if (event.candidate) {
-				// Send ICE candidate to remote peer via Firebase
-				database.ref(`calls/${callData.callId}/iceCandidates/${currentUser.uid}`).push({
-					candidate: event.candidate
-				});
-			}
-		};
-		
-		// Handle connection state changes
-		peerConnection.onconnectionstatechange = () => {
-			console.log("Connection state:", peerConnection.connectionState);
-			if (peerConnection.connectionState === 'disconnected' || 
-				peerConnection.connectionState === 'failed' || 
-				peerConnection.connectionState === 'closed') {
-				endCall();
-			}
-		};
-		
-		try {
-			// Create a proper RTCSessionDescription object
-			const offer = new RTCSessionDescription({
-				type: callData.offer.type || 'offer',
-				sdp: callData.offer.sdp || callData.offer
-			});
-			
-			// Set remote description and create answer
-			peerConnection.setRemoteDescription(offer)
-				.then(() => {
-					console.log("Remote description set successfully");
-					return peerConnection.createAnswer();
-				})
-				.then(answer => {
-					console.log("Answer created successfully");
-					return peerConnection.setLocalDescription(answer);
-				})
-				.then(() => {
-					console.log("Local description set successfully");
-					// Send answer to caller via Firebase
-					database.ref(`calls/${callData.callId}/answer`).set({
-						answer: {
-							type: peerConnection.localDescription.type,
-							sdp: peerConnection.localDescription.sdp
-						}
-					});
-					
-					// Listen for ICE candidates from caller
-					database.ref(`calls/${callData.callId}/iceCandidates/${callData.from}`).on('child_added', snapshot => {
-						if (snapshot.exists()) {
-							const candidate = snapshot.val().candidate;
-							peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-						}
-					});
-				})
-				.catch(error => {
-					console.error("Error in WebRTC handshake:", error);
-					callStatus.textContent = "Failed to answer call";
-					notifications.error("Failed to establish connection. Please try again.", "Connection Error");
-					endCall();
-				});
-		} catch (error) {
-			console.error("Error creating RTCSessionDescription:", error);
-			callStatus.textContent = "Failed to answer call";
-			notifications.error("Invalid call data received", "Connection Error");
-			incomingCallModal.classList.remove('show');
-		}
-		
-		// Don't set incomingCallData to null here - let endCall handle it
-	}
-
-	// Reject incoming call
-	function rejectCall() {
-		if (!incomingCallData) return;
-		
-		// Clear timeout
-		if (callTimeout) {
-			clearTimeout(callTimeout);
-			callTimeout = null;
-		}
-		
-		// Hide modal
-		incomingCallModal.classList.remove('show');
-		
-		// Remove call data from Firebase
-		database.ref(`calls/${incomingCallData.callId}`).remove();
-		
-		incomingCallData = null;
-	}
-
-	// End current call
-	function endCall() {
-		// Clear any pending timeout
-		if (callTimeout) {
-			clearTimeout(callTimeout);
-			callTimeout = null;
-		}
-		
-		// Clear any pending video play attempts
-		if (playVideoTimeout) {
-			clearTimeout(playVideoTimeout);
-			playVideoTimeout = null;
-		}
-		
-		// Store the call ID before we clear it
-		const callId = currentCall ? currentCall.callId : null;
-		
-		if (currentCall) {
-			console.log("Ending call with ID:", currentCall.callId);
-			
-			// Clean up peer connection
-			if (peerConnection) {
-				peerConnection.close();
-				peerConnection = null;
-			}
-			
-			// Clean up remote stream
-			if (remoteStream) {
-				remoteStream.getTracks().forEach(track => track.stop());
-				remoteStream = null;
-			}
-			
-			// Properly clear remote video
-			if (remoteVideo) {
-				// Clear the event handler to prevent it from firing on a cleared stream
-				remoteVideo.onloadedmetadata = null;
-				// Set srcObject to null to stop the stream
-				remoteVideo.srcObject = null;
-				// Pause the element to ensure it's in a neutral state
-				remoteVideo.pause();
-			}
-			
-			remoteVideoLabel.textContent = "Waiting for connection...";
-			
-			// Remove call data from Firebase
-			database.ref(`calls/${currentCall.callId}`).remove();
-			
-			// Reset state
-			currentCall = null;
-			callStatus.textContent = "Ready to make calls";
-			notifications.info("Call ended", "Call Status");
-		}
-		
-		// Clear any incoming call
-		if (incomingCallData) {
-			incomingCallData = null;
-			incomingCallModal.classList.remove('show');
-		}
-		
-		// If we had a call ID but no currentCall (e.g., call was rejected), clean it up
-		if (callId && !currentCall) {
-			database.ref(`calls/${callId}`).remove();
-		}
-	}
-
-	// Toggle mute
-	function toggleMute() {
-		if (!localStream) return;
-		
-		isMuted = !isMuted;
-		const audioTracks = localStream.getAudioTracks();
-		
-		audioTracks.forEach(track => {
-			track.enabled = !isMuted;
-		});
-		
-		// Update UI
-		muteBtn.textContent = isMuted ? '🔇' : '🎤';
-		muteBtn.classList.toggle('muted', isMuted);
-		
-		// Show notification
-		notifications.info(isMuted ? "Microphone muted" : "Microphone unmuted", "Audio Status");
-	}
-
-	// Toggle video
-	function toggleVideo() {
-		if (!localStream) return;
-		
-		isVideoOff = !isVideoOff;
-		const videoTracks = localStream.getVideoTracks();
-		
-		videoTracks.forEach(track => {
-			track.enabled = !isVideoOff;
-		});
-		
-		// Update UI
-		videoBtn.textContent = isVideoOff ? '📹' : '📹';
-		videoBtn.classList.toggle('muted', isVideoOff);
-		
-		// Show notification
-		notifications.info(isVideoOff ? "Camera turned off" : "Camera turned on", "Video Status");
-	}
-
-	// Generate a unique call ID
-	function generateCallId() {
-		return Date.now().toString(36) + Math.random().toString(36).substr(2);
-	}
+    // Generate a unique call ID
+    function generateCallId() {
+        return Date.now().toString(36) + Math.random().toString(36).substr(2);
+    }
+    
+    // Listen for incoming calls
+    function listenForIncomingCalls() {
+        database.ref('calls').on('child_added', snapshot => {
+            if (snapshot.exists()) {
+                const callId = snapshot.key;
+                const callData = snapshot.val();
+                
+                console.log("Incoming call detected:", callData);
+                
+                // Only handle incoming calls where current user is the recipient
+                if (callData.to === currentUser.uid && !currentCall && !incomingCallData) {
+                    // Add the callId to the data object for later use
+                    callData.callId = callId;
+                    
+                    // Validate the call data has an offer
+                    if (callData.offer && callData.from && callData.fromName) {
+                        answerCall(callData);
+                    } else {
+                        console.error("Invalid call data received (missing offer):", callData);
+                        // Clean up invalid call data
+                        database.ref(`calls/${callId}`).remove();
+                    }
+                }
+            }
+        });
+        
+        // Also listen for call removals (when a call ends or is rejected)
+        database.ref('calls').on('child_removed', snapshot => {
+            const callId = snapshot.key;
+            
+            // If this was our call and it's been removed, end our call
+            if (currentCall && currentCall.callId === callId) {
+                console.log("Call was removed from Firebase, ending call");
+                endCall();
+            }
+            
+            // If this was an incoming call and it's been removed, clear the UI
+            if (incomingCallData && incomingCallData.callId === callId) {
+                console.log("Incoming call was removed from Firebase");
+                incomingCallData = null;
+                incomingCallModal.classList.remove('show');
+            }
+        });
+    }
 	
-	// Listen for incoming calls
-	function listenForIncomingCalls() {
-		// Use child_added instead of on for better handling
-		database.ref('calls').on('child_added', snapshot => {
-			if (snapshot.exists()) {
-				const callId = snapshot.key;
-				const callData = snapshot.val();
-				
-				console.log("Incoming call detected:", callData);
-				
-				// Only handle incoming calls (where current user is recipient)
-				if (callData.to === currentUser.uid && !currentCall && !incomingCallData) {
-					// Add call ID to the data
-					callData.callId = callId;
-					
-					// Validate the call data
-					if (callData.offer && callData.from && callData.fromName) {
-						answerCall(callData);
-					} else {
-						console.error("Invalid call data received:", callData);
-						// Clean up invalid call data
-						database.ref(`calls/${callId}`).remove();
-					}
-				}
-			}
-		});
-		
-		// Also listen for call removals (when a call ends)
-		database.ref('calls').on('child_removed', snapshot => {
-			const callId = snapshot.key;
-			
-			// If this was our call and it's been removed, end our call
-			if (currentCall && currentCall.callId === callId) {
-				console.log("Call was removed from Firebase, ending call");
-				endCall();
-			}
-			
-			// If this was an incoming call and it's been removed, clear incoming call data
-			if (incomingCallData && incomingCallData.callId === callId) {
-				console.log("Incoming call was removed from Firebase");
-				incomingCallData = null;
-				incomingCallModal.classList.remove('show');
-			}
-		});
-	}
-
     // ====================================================================================================
     // EVENT LISTENERS
     // ====================================================================================================
@@ -1627,8 +1431,41 @@ document.addEventListener('DOMContentLoaded', function() {
 			});
 		}
 	}
+	
+	// Brother asked a very good question
+	function monitorVideoElement() {
+		if (!remoteVideo || !currentCall) return;
+		
+		console.log("Video element state:", {
+			readyState: remoteVideo.readyState,
+			networkState: remoteVideo.networkState,
+			paused: remoteVideo.paused,
+			ended: remoteVideo.ended,
+			currentTime: remoteVideo.currentTime,
+			duration: remoteVideo.duration,
+			error: remoteVideo.error
+		});
+		
+		// If the video element is in an error state, try to recover
+		if (remoteVideo.error) {
+			console.error("Video element error:", remoteVideo.error);
+			console.log("Attempting to recover from video error");
+			
+			// Clear the error and reload
+			remoteVideo.srcObject = remoteVideo.srcObject;
+			remoteVideo.load();
+		}
+	}
 
-	// Call this periodically to debug
+	// Update the debug interval to use this new function
+	setInterval(() => {
+		if (currentCall) {
+			debugRemoteMedia();
+			monitorVideoElement();
+		}
+	}, 2000);
+
+	// Call periodically to debug
 	setInterval(() => {
 		if (currentCall) {
 			debugRemoteMedia();
