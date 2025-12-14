@@ -86,6 +86,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const endCallBtn = document.getElementById('end-call-btn');
     const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
     const sidebar = document.getElementById('sidebar');
+	const toggleScreenShareBtn = document.getElementById('toggle-screen-share-btn');
+	const screenShareVideo = document.getElementById('screen-share-video');
     
     // Email verification elements
     const emailVerificationIcon = document.getElementById('email-verification-icon');
@@ -104,33 +106,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let isVideoOff = false;
     let allUsers = {};
     let collapsedSections = {};
-	
-	// ====================================================================================================
-	
-	// Add this after the DOM elements section
-	const debugPlayBtn = document.createElement('button');
-	debugPlayBtn.textContent = 'Debug: Play Video';
-	debugPlayBtn.style.position = 'fixed';
-	debugPlayBtn.style.bottom = '10px';
-	debugPlayBtn.style.right = '10px';
-	debugPlayBtn.style.zIndex = '9999';
-	debugPlayBtn.style.padding = '10px';
-	debugPlayBtn.style.backgroundColor = '#ff0000';
-	debugPlayBtn.style.color = '#ffffff';
-	debugPlayBtn.style.border = 'none';
-	debugPlayBtn.style.borderRadius = '5px';
-	debugPlayBtn.style.cursor = 'pointer';
-	document.body.appendChild(debugPlayBtn);
-
-	debugPlayBtn.addEventListener('click', () => {
-		if (remoteVideo && remoteVideo.srcObject) {
-			console.log("Manual play attempt");
-			remoteVideo.load();
-			remoteVideo.play().catch(e => {
-				console.error("Manual play failed:", e);
-			});
-		}
-	});
+	let isScreenSharing = false;
+	let screenShareStream = null;
 	
 	// ====================================================================================================
 	// UTILITY FUNCTIONS
@@ -1182,6 +1159,24 @@ document.addEventListener('DOMContentLoaded', function() {
                 remoteVideo.pause();
                 remoteVideo.srcObject = null;
             }
+
+			// Stop screen share stream if active
+			if (isScreenSharing && screenShareStream) {
+			    screenShareStream.getTracks().forEach(track => track.stop());
+			    screenShareStream = null;
+			    isScreenSharing = false;
+			    
+			    if (screenShareVideo) {
+			        screenShareVideo.style.display = 'none';
+			        screenShareVideo.srcObject = null;
+			    }
+			    
+			    // Update screen share button
+			    if (toggleScreenShareBtn) {
+			        toggleScreenShareBtn.classList.remove('screen-sharing');
+			        toggleScreenShareBtn.textContent = '🖥️';
+			    }
+			}
             
             remoteVideoLabel.textContent = "Waiting for connection...";
             
@@ -1287,6 +1282,99 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     }
+
+	// Toggle screen sharing
+	async function toggleScreenShare() {
+	    if (!isCallActive) {
+	        notifications.warning("You need to be in a call to share your screen.", "Cannot Share");
+	        return;
+	    }
+	
+	    if (isScreenSharing) {
+	        // Stop screen sharing
+	        if (screenShareStream) {
+	            screenShareStream.getTracks().forEach(track => track.stop());
+	            screenShareStream = null;
+	        }
+	        
+	        isScreenSharing = false;
+	        
+	        if (screenShareVideo) {
+	            screenShareVideo.style.display = 'none';
+	            screenShareVideo.srcObject = null;
+	        }
+	        
+	        // Update screen share button
+	        if (toggleScreenShareBtn) {
+	            toggleScreenShareBtn.classList.remove('screen-sharing');
+	            toggleScreenShareBtn.textContent = '🖥️';
+	        }
+	        
+	        // Remove screen share track from peer connection
+	        if (peerConnection) {
+	            const sender = peerConnection.getSenders().find(s => 
+	                s.track && s.track.kind === 'video' && s.track.label.includes('screen')
+	            );
+	            if (sender) {
+	                peerConnection.removeTrack(sender);
+	            }
+	            
+	            // Add back camera video track if available
+	            if (localStream) {
+	                const videoTrack = localStream.getVideoTracks()[0];
+	                if (videoTrack) {
+	                    peerConnection.addTrack(videoTrack, localStream);
+	                }
+	            }
+	        }
+	    } else {
+	        try {
+	            // Start screen sharing
+	            screenShareStream = await navigator.mediaDevices.getDisplayMedia({
+	                video: true,
+	                audio: false
+	            });
+	            
+	            isScreenSharing = true;
+	            
+	            if (screenShareVideo) {
+	                screenShareVideo.srcObject = screenShareStream;
+	                screenShareVideo.style.display = 'block';
+	            }
+	            
+	            // Update screen share button
+	            if (toggleScreenShareBtn) {
+	                toggleScreenShareBtn.classList.add('screen-sharing');
+	                toggleScreenShareBtn.textContent = '⏹️';
+	            }
+	            
+	            // Replace camera video with screen share in peer connection
+	            if (peerConnection) {
+	                const sender = peerConnection.getSenders().find(s => 
+	                    s.track && s.track.kind === 'video' && !s.track.label.includes('screen')
+	                );
+	                if (sender) {
+	                    peerConnection.removeTrack(sender);
+	                }
+	                
+	                // Add screen share track
+	                const screenTrack = screenShareStream.getVideoTracks()[0];
+	                if (screenTrack) {
+	                    peerConnection.addTrack(screenTrack, screenShareStream);
+	                }
+	            }
+	            
+	            // Handle screen share end
+	            screenShareStream.getVideoTracks()[0].addEventListener('ended', () => {
+	                toggleScreenShare();
+	            });
+	            
+	        } catch (error) {
+	            console.error("Error starting screen share:", error);
+	            notifications.error("Could not share your screen.", "Screen Share Error");
+	        }
+	    }
+	}
 	
     // ====================================================================================================
     // EVENT LISTENERS
@@ -1349,6 +1437,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (muteBtn) muteBtn.addEventListener('click', toggleMute);
     if (videoBtn) videoBtn.addEventListener('click', toggleVideo);
     if (endCallBtn) endCallBtn.addEventListener('click', endCall);
+	if (toggleScreenShareBtn) toggleScreenShareBtn.addEventListener('click', toggleScreenShare);
 
 	// Call modal event listeners
 	if (acceptCallBtn) acceptCallBtn.addEventListener('click', acceptCall);
@@ -1471,4 +1560,5 @@ document.addEventListener('DOMContentLoaded', function() {
 			debugRemoteMedia();
 		}
 	}, 2000);
+
 });
